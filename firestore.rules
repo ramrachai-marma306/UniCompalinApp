@@ -1,0 +1,243 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // UniFix prototype targets the project's (default) Standard database.
+    function signedIn() { return request.auth != null; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    function isAdmin() { return verified() && request.auth.token.admin == true; }
+    function userPath(uid) { return /databases/$(database)/documents/Users/$(uid); }
+    function isStudent(uid) {
+      return verified()
+        && request.auth.uid == uid
+        && exists(userPath(uid))
+        && get(userPath(uid)).data.uid == uid
+        && get(userPath(uid)).data.role == 'student';
+    }
+
+    function isValidUser(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'fullName', 'studentId', 'department', 'email', 'phone', 'role', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'fullName', 'studentId', 'department', 'email', 'phone', 'role', 'createdAt'
+        ])
+        && data.uid is string && data.uid == uid
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 80
+        && data.studentId is string && data.studentId.size() >= 2 && data.studentId.size() <= 40
+        && data.department is string && data.department.size() >= 2 && data.department.size() <= 80
+        && data.email is string && data.email.size() <= 254
+        && data.email.matches('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$')
+        && data.email == request.auth.token.email
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 20
+        && data.role == 'student'
+        && data.createdAt is timestamp;
+    }
+
+    function validCategory(category) {
+      return category in [
+        'Classroom Problems', 'Laboratory Equipment', 'Internet / Wi-Fi Problems',
+        'Electrical Problems', 'Furniture Problems', 'Washroom Problems', 'Other Issues'
+      ];
+    }
+    function validStatus(status) {
+      return status in ['Pending', 'In Progress', 'Resolved', 'Rejected'];
+    }
+    function validImagePath(data, complaintId) {
+      return data.imagePath == ''
+        || data.imagePath == 'complaints/' + data.studentUid + '/' + complaintId + '/problem';
+    }
+
+    // complaint.studentUid is the immutable Auth owner; studentId is the university ID.
+    function isValidComplaint(data, complaintId) {
+      return data.keys().hasAll([
+          'complaintId', 'studentUid', 'studentId', 'studentName', 'title', 'category',
+          'description', 'department', 'location', 'imageUrl', 'imagePath',
+          'assignedDepartment', 'status', 'adminRemarks', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'complaintId', 'studentUid', 'studentId', 'studentName', 'title', 'category',
+          'description', 'department', 'location', 'imageUrl', 'imagePath',
+          'assignedDepartment', 'status', 'adminRemarks', 'createdAt', 'updatedAt'
+        ])
+        && data.complaintId is string && data.complaintId == complaintId
+        && data.studentUid is string && data.studentUid.size() >= 1 && data.studentUid.size() <= 128
+        && data.studentId is string && data.studentId.size() >= 2 && data.studentId.size() <= 40
+        && data.studentName is string && data.studentName.size() >= 2 && data.studentName.size() <= 80
+        && data.title is string && data.title.size() >= 4 && data.title.size() <= 120
+        && data.category is string && validCategory(data.category)
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 3000
+        && data.department is string && data.department.size() >= 2 && data.department.size() <= 80
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 120
+        && data.imageUrl is string && data.imageUrl.size() <= 400 && data.imageUrl == ''
+        && data.imagePath is string && data.imagePath.size() <= 256
+        && validImagePath(data, complaintId)
+        && data.assignedDepartment is string && data.assignedDepartment.size() <= 80
+        && data.status is string && validStatus(data.status)
+        && data.adminRemarks is string && data.adminRemarks.size() <= 1000
+        && data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function validStatusTransition(oldStatus, newStatus) {
+      return oldStatus == newStatus
+        || (oldStatus == 'Pending' && newStatus in ['In Progress', 'Rejected'])
+        || (oldStatus == 'In Progress' && newStatus in ['Resolved', 'Rejected']);
+    }
+
+    function isValidHistory(data) {
+      return data.keys().hasAll(['status', 'assignedDepartment', 'remarks', 'updatedBy', 'createdAt'])
+        && data.keys().hasOnly(['status', 'assignedDepartment', 'remarks', 'updatedBy', 'createdAt'])
+        && data.status is string && validStatus(data.status)
+        && data.assignedDepartment is string && data.assignedDepartment.size() <= 80
+        && data.remarks is string && data.remarks.size() <= 1000
+        && data.updatedBy is string && data.updatedBy == request.auth.uid
+        && data.createdAt is timestamp && data.createdAt == request.time;
+    }
+
+    function isValidFeedback(data, complaintId) {
+      return data.keys().hasAll(['feedbackId', 'complaintId', 'studentId', 'rating', 'comment', 'createdAt'])
+        && data.keys().hasOnly(['feedbackId', 'complaintId', 'studentId', 'rating', 'comment', 'createdAt'])
+        && data.feedbackId is string && data.feedbackId == complaintId
+        && data.complaintId is string && data.complaintId == complaintId
+        && data.studentId is string && data.studentId == request.auth.uid
+        && data.rating is int && data.rating >= 1 && data.rating <= 5
+        && data.comment is string && data.comment.size() <= 1000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data, notificationId) {
+      return data.keys().hasAll(['notificationId', 'userId', 'title', 'message', 'isRead', 'createdAt'])
+        && data.keys().hasOnly(['notificationId', 'userId', 'title', 'message', 'isRead', 'createdAt'])
+        && data.notificationId is string && data.notificationId == notificationId
+        && data.userId is string && data.userId.size() <= 128
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.message is string && data.message.size() <= 1000
+        && data.isRead is bool && data.createdAt is timestamp;
+    }
+
+    match /Users/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && isValidUser(request.resource.data, uid)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isStudent(uid)
+        && isValidUser(request.resource.data, uid)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'fullName', 'department', 'phone'
+        ]);
+      allow delete: if false;
+
+      match /Tokens/{tokenId} {
+        function isValidToken(data) {
+          return data.keys().hasAll(['token', 'updatedAt'])
+            && data.keys().hasOnly(['token', 'updatedAt'])
+            && data.token is string && data.token.size() >= 20 && data.token.size() <= 4096
+            && data.updatedAt is timestamp && data.updatedAt == request.time
+            && tokenId.matches('^[a-f0-9]{64}$');
+        }
+        allow read: if false;
+        allow create: if isStudent(uid) && isValidToken(request.resource.data);
+        allow update: if isStudent(uid)
+          && isValidToken(request.resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['token', 'updatedAt']);
+        allow delete: if isStudent(uid);
+      }
+    }
+
+    match /Complaints/{complaintId} {
+      allow get, list: if isAdmin()
+        || (signedIn() && isStudent(request.auth.uid)
+          && resource.data.studentUid == request.auth.uid);
+
+      allow create: if signedIn()
+        && isStudent(request.auth.uid)
+        && isValidComplaint(request.resource.data, complaintId)
+        && request.resource.data.studentUid == request.auth.uid
+        && request.resource.data.studentId == get(userPath(request.auth.uid)).data.studentId
+        && request.resource.data.studentName == get(userPath(request.auth.uid)).data.fullName
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.assignedDepartment == ''
+        && request.resource.data.adminRemarks == ''
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidComplaint(request.resource.data, complaintId)
+        && request.resource.data.complaintId == resource.data.complaintId
+        && request.resource.data.studentUid == resource.data.studentUid
+        && request.resource.data.studentId == resource.data.studentId
+        && request.resource.data.studentName == resource.data.studentName
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.department == resource.data.department
+        && request.resource.data.location == resource.data.location
+        && request.resource.data.imageUrl == resource.data.imageUrl
+        && request.resource.data.imagePath == resource.data.imagePath
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && validStatusTransition(resource.data.status, request.resource.data.status)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'assignedDepartment', 'adminRemarks', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      match /StatusHistory/{eventId} {
+        function parentComplaint() {
+          return get(/databases/$(database)/documents/Complaints/$(complaintId));
+        }
+        allow get, list: if isAdmin()
+          || (signedIn() && isStudent(request.auth.uid)
+            && parentComplaint().data.studentUid == request.auth.uid);
+        allow create: if isAdmin()
+          && exists(/databases/$(database)/documents/Complaints/$(complaintId))
+          && isValidHistory(request.resource.data);
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    match /Feedback/{complaintId} {
+      allow get, list: if isAdmin()
+        || (signedIn() && isStudent(request.auth.uid)
+          && resource.data.studentId == request.auth.uid);
+      allow create: if signedIn()
+        && isStudent(request.auth.uid)
+        && isValidFeedback(request.resource.data, complaintId)
+        && exists(/databases/$(database)/documents/Complaints/$(complaintId))
+        && get(/databases/$(database)/documents/Complaints/$(complaintId)).data.studentUid == request.auth.uid
+        && get(/databases/$(database)/documents/Complaints/$(complaintId)).data.status == 'Resolved'
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn() && isStudent(request.auth.uid)
+        && isValidFeedback(request.resource.data, complaintId) && false;
+      allow delete: if false;
+    }
+
+    match /Notifications/{notificationId} {
+      allow get, list: if signedIn() && isStudent(request.auth.uid)
+        && resource.data.userId == request.auth.uid;
+      allow create: if false;
+      allow update: if signedIn()
+        && isStudent(request.auth.uid)
+        && isValidNotification(request.resource.data, notificationId)
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.notificationId == resource.data.notificationId
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.message == resource.data.message
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

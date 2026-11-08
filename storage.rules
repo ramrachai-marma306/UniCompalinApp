@@ -1,0 +1,51 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function verified() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return verified() && request.auth.token.admin == true;
+    }
+
+    function studentProfile(uid) {
+      return firestore.get(/databases/(default)/documents/Users/$(uid));
+    }
+
+    function ownsComplaint(uid, complaintId) {
+      return firestore.get(/databases/(default)/documents/Complaints/$(complaintId)).data.studentUid == uid
+        && firestore.get(/databases/(default)/documents/Complaints/$(complaintId)).data.imagePath
+          == 'complaints/' + uid + '/' + complaintId + '/problem';
+    }
+
+    match /complaints/{uid}/{complaintId}/problem {
+      allow get: if isAdmin()
+        || (verified()
+          && request.auth.uid == uid
+          && studentProfile(uid).data.role == 'student'
+          && ownsComplaint(uid, complaintId));
+
+      allow create: if verified()
+        && request.auth.uid == uid
+        && studentProfile(uid).data.role == 'student'
+        && ownsComplaint(uid, complaintId)
+        && request.resource.size > 0
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+
+      // Complaint attachment paths are immutable and cannot be replaced or deleted by clients.
+      allow update, delete: if false;
+    }
+
+    // No other object path is accessible from the client.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
